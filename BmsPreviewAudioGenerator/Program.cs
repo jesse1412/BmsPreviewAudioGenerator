@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace BmsPreviewAudioGenerator
 {
@@ -54,6 +55,7 @@ namespace BmsPreviewAudioGenerator
             var et = CommandLine.TryGetOptionValue<string>("end", out var e) ? e : null;
             var fo = CommandLine.TryGetOptionValue<int>("fade_out", out var foo) ? foo : 0;
             var fi = CommandLine.TryGetOptionValue<int>("fade_in", out var fii) ? fii : 0;
+            var threads = CommandLine.TryGetOptionValue<int>("threads", out var tc) ? tc : 1;
             var sn = CommandLine.TryGetOptionValue<string>("save_name", out var sw) ? sw : "preview_auto_generator.ogg";
             var path = CommandLine.TryGetOptionValue<string>("path", out var p) ? p : throw new Exception("MUST type a path.");
             var bms = CommandLine.TryGetOptionValue<string>("bms", out var b) ? b : null;
@@ -87,32 +89,23 @@ namespace BmsPreviewAudioGenerator
 
             HashSet<string> failed_paths = new HashSet<string>();
 
-            for (int i = 0; i < target_directories.Length; i++)
-            {
-                Console.WriteLine($"-------\t{i + 1}/{target_directories.Length} ({100.0f * (i + 1) / target_directories.Length:F2}%)\t-------");
-                var dir = target_directories[i];
-                try
-                {
-                    if (!GeneratePreviewAudio(dir, bms, st, et, save_file_name: sn, no_skip: ns, fast_clip: fc, check_vaild: cv, fade_in: fi, fade_out: fo))
-                        failed_paths.Add(dir);
-                }
-                catch (Exception ex)
-                {
-                    failed_paths.Add(dir);
-                    Console.WriteLine($"Failed.\n{ex.Message}\n{ex.StackTrace}");
-                }
+            int dirs_per_thread = target_directories.Length / threads;
 
-                if (Bass.LastError != Errors.OK)
-                {
-                    Console.WriteLine($"Bass get error:{Bass.LastError},try reinit...");
-                    Bass.Free();
-                    if (!Bass.Init())
-                    {
-                        Console.WriteLine($"Reinit BASS failed:{Bass.LastError}");
-                        return;
-                    }
-                    Console.WriteLine($"Success reinit BASS.");
-                }
+            Task<HashSet<string>>[] tasks = new Task<HashSet<string>>[threads];
+
+            for (int i = 0; i < Math.Max(threads, 1); i++)
+            {
+                var start_pos = i * dirs_per_thread;
+                var end_pos = (i == Math.Max(threads, 1)) ? target_directories.Length : (i + 1) * dirs_per_thread;
+                var thread_dirs = target_directories[start_pos..end_pos];
+                tasks[i] = Task.Factory.StartNew(() => GeneratePreviewAudios(thread_dirs, bms, st, et, save_file_name: sn, no_skip: ns, fast_clip: fc, check_vaild: cv, fade_in: fi, fade_out: fo));
+            }
+
+            Task.WaitAll();
+
+            foreach(var task in tasks)
+            {
+                failed_paths.UnionWith(task.Result);
             }
 
             Console.WriteLine($"\n\n\nGenerate failed list({failed_paths.Count}):");
@@ -409,6 +402,61 @@ namespace BmsPreviewAudioGenerator
 
                 return handle;
             }
+        }
+
+        public static HashSet<string> GeneratePreviewAudios(
+            string[] dir_paths,
+            string specific_bms_file_name = null,
+            string start_time = null,
+            string end_time = null,
+            string encoder_command_line = "",
+            string save_file_name = "preview_auto_generator.ogg",
+            int fade_out = 0,
+            int fade_in = 0,
+            bool check_vaild = false,
+            bool fast_clip = false,
+            bool no_skip = false)
+        {
+            HashSet<string> failed_paths = new HashSet<string>();
+
+            foreach(string dir_path in dir_paths)
+            {
+                try
+                {
+                    if (!GeneratePreviewAudio(dir_path,
+                        specific_bms_file_name,
+                        start_time,
+                        end_time,
+                        encoder_command_line,
+                        save_file_name,
+                        fade_out,
+                        fade_in,
+                        check_vaild,
+                        fast_clip,
+                        no_skip))
+                    {
+                        failed_paths.Add(dir_path);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failed_paths.Add(dir_path);
+                    Console.WriteLine($"Failed.\n{ex.Message}\n{ex.StackTrace}");
+                }
+
+                if (Bass.LastError != Errors.OK)
+                {
+                    Console.WriteLine($"Bass get error:{Bass.LastError},try reinit...");
+                    Bass.Free();
+                    if (!Bass.Init())
+                    {
+                        Console.WriteLine($"Reinit BASS failed:{Bass.LastError}");
+                        return failed_paths;
+                    }
+                    Console.WriteLine($"Success reinit BASS.");
+                }
+            }
+            return failed_paths;
         }
 
         /// <summary>
